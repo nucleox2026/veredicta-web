@@ -8,7 +8,7 @@ const DJEN_PROXY =
   "https://veredicta-djen-br.guilherme-moussalem.workers.dev";
 
 const SEARCH_STATE_KEY =
-  "veredicta_search_state_v6_company_fallback";
+  "veredicta_search_state_v7_company_text_fallback";
 
 const SELECTED_PROCESS_KEY =
   "veredicta_selected_process_v3";
@@ -773,6 +773,79 @@ function looksLikeCompanyName(value) {
 }
 
 
+function extractDefendantCompaniesFromText(rawText) {
+  const text = String(rawText || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 8000);
+
+  if (!text) {
+    return [];
+  }
+
+  // O DJEN nem sempre inclui o réu em `destinatarios`. Em muitos documentos
+  // o polo passivo aparece apenas no texto, por exemplo:
+  // "Réu: BRADESCO SAUDE S/A DECISÃO ...".
+  const terminators = [
+    "AUTOR(?:A)?",
+    "REQUERENTE",
+    "R[ÉE]U",
+    "R[ÉE]",
+    "REQUERID[OA]",
+    "RECLAMAD[OA]",
+    "VISTOS?",
+    "RELAT[ÓO]RIO",
+    "FUNDAMENTO",
+    "DECIDO",
+    "SENTEN[ÇC]A",
+    "DECIS[ÃA]O",
+    "DESPACHO",
+    "AC[ÓO]RD[ÃA]O",
+    "DISPOSITIVO",
+    "INTIMA[ÇC][ÃA]O",
+    "MANDADO",
+    "CERTID[ÃA]O",
+    "EDITAL",
+    "PROCESSO",
+    "ADVOGAD[OA]"
+  ].join("|");
+
+  const rolePattern = new RegExp(
+    `\\b(?:R[ÉE]U|R[ÉE]|REQUERID[OA]|RECLAMAD[OA])\\s*:\\s*` +
+      `(.+?)(?=\\s+(?:${terminators})\\b|$)`,
+    "giu"
+  );
+
+  const names = [];
+  const seen = new Set();
+
+  for (const match of text.matchAll(rolePattern)) {
+    const name = String(match[1] || "")
+      .replace(/\s+(?:CPF|CNPJ)\s*:\s*[\d./-]+.*$/i, "")
+      .replace(/\s+(?:e\s+outros|e\s+outr[oa]s)\s*$/i, "")
+      .replace(/^[\-–—:;,.\s]+|[\-–—:;,\s]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!name || name.length < 3 || name.length > 300) {
+      continue;
+    }
+
+    if (!looksLikeCompanyName(name)) {
+      continue;
+    }
+
+    const key = name.toUpperCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      names.push(name);
+    }
+  }
+
+  return names;
+}
+
+
 function extractCompaniesFromDjenPayload(payload) {
   const names = [];
   const seen = new Set();
@@ -824,6 +897,17 @@ function extractCompaniesFromDjenPayload(payload) {
         return;
       }
 
+      const key = name.toUpperCase();
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        names.push(name);
+      }
+    });
+
+    // Fallback textual: algumas comunicações do DJEN trazem somente o autor
+    // em `destinatarios`, mas registram o polo passivo no corpo do documento.
+    extractDefendantCompaniesFromText(communication.texto).forEach((name) => {
       const key = name.toUpperCase();
 
       if (!seen.has(key)) {
