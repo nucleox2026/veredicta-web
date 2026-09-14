@@ -803,7 +803,7 @@ function renderPartyGroup(
   if (!safeParties.length) {
     element.innerHTML = `
       <span class="party-empty">
-        Não identificado no DataJud
+        Não identificado nas fontes públicas consultadas
       </span>
     `;
 
@@ -1109,6 +1109,23 @@ function renderProcess(
   renderMovements(
     process
   );
+
+  if (process.djen) {
+    renderDjenAnalysis(
+      process.djen,
+      process.djen_consulta
+    );
+  }
+
+  const activeCount = Array.isArray(parties.ativo) ? parties.ativo.length : 0;
+  const passiveCount = Array.isArray(parties.passivo) ? parties.passivo.length : 0;
+  const partyNotice = $("partyNotice");
+  if (partyNotice) {
+    partyNotice.textContent =
+      activeCount || passiveCount
+        ? "Partes consolidadas a partir do DataJud e das comunicações públicas do DJEN/CNJ."
+        : "As fontes públicas consultadas não expuseram os nomes das partes deste processo.";
+  }
 }
 
 
@@ -1222,6 +1239,33 @@ function renderList(
 }
 
 
+function exposeDjenDocumentSection() {
+  const section = $("djenAnalysisSection");
+  const analysisContent = $("analysisContent");
+
+  if (!section || !analysisContent) {
+    return;
+  }
+
+  const analysisCard = analysisContent.closest(".card");
+  if (analysisCard && analysisCard.parentNode && section.parentNode !== analysisCard.parentNode) {
+    section.classList.add("card");
+    analysisCard.parentNode.insertBefore(section, analysisCard);
+  }
+
+  const grid = section.querySelector(".djen-analysis-grid");
+  if (grid && !$("djenCauseValue")) {
+    const article = document.createElement("article");
+    article.className = "analysis-item";
+    article.innerHTML = `
+      <span>Valor da causa · menção documental</span>
+      <strong id="djenCauseValue">—</strong>
+    `;
+    grid.appendChild(article);
+  }
+}
+
+
 function renderDjenAnalysis(djen, consulta) {
   const data = djen || {};
   const status = String(
@@ -1249,6 +1293,13 @@ function renderDjenAnalysis(djen, consulta) {
     data.valor_dano_material_primeiro_grau_centavos != null
       ? formatMoneyFromCents(data.valor_dano_material_primeiro_grau_centavos)
       : "—";
+
+  if ($("djenCauseValue")) {
+    $("djenCauseValue").textContent =
+      data.valor_da_causa_centavos != null
+        ? formatMoneyFromCents(data.valor_da_causa_centavos)
+        : "—";
+  }
 
   const statusLabels = {
     valor_moral_encontrado: "Valor moral localizado",
@@ -1419,10 +1470,12 @@ function showAnalysisEmpty() {
     .textContent =
     "Não analisado";
 
-  renderDjenAnalysis(
-    null,
-    { status: "nao_consultado" }
-  );
+  if (!(currentProcess && currentProcess.djen)) {
+    renderDjenAnalysis(
+      null,
+      { status: "nao_consultado" }
+    );
+  }
 }
 
 
@@ -1442,9 +1495,19 @@ function renderAnalysis(
     .textContent =
     "Analisado";
 
+  const liveDjen =
+    currentProcess && currentProcess.djen
+      ? currentProcess.djen
+      : analysis.djen;
+
+  const liveDjenConsulta =
+    currentProcess && currentProcess.djen_consulta
+      ? currentProcess.djen_consulta
+      : analysis.djen_consulta;
+
   renderDjenAnalysis(
-    analysis.djen,
-    analysis.djen_consulta
+    liveDjen,
+    liveDjenConsulta
   );
 
   $("analysisMoral")
@@ -1790,6 +1853,7 @@ function bindEvents() {
 
 
 async function initializePage() {
+  exposeDjenDocumentSection();
   bindEvents();
   setupBackNavigation();
   checkHealth();
