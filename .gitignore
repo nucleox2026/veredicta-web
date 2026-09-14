@@ -1,0 +1,8 @@
+# Arquivos locais e temporários
+*.bak
+*.bak_*
+*.bak-*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
