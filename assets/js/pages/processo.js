@@ -6,6 +6,9 @@ const API = String(
   "https://veredicta-api.onrender.com"
 ).replace(/\/$/, "");
 
+const DJEN_PROXY =
+  "https://veredicta-djen-br.guilherme-moussalem.workers.dev";
+
 const SELECTED_PROCESS_KEY =
   "veredicta_selected_process_v3";
 
@@ -415,6 +418,214 @@ function getProcessReference() {
     tribunal,
     numero
   };
+}
+
+
+
+function mergePartyCollections(primary, secondary) {
+  const result = { ativo: [], passivo: [], outros: [] };
+
+  ["ativo", "passivo", "outros"].forEach((key) => {
+    const seen = new Set();
+    [primary, secondary].forEach((source) => {
+      const rows = source && Array.isArray(source[key]) ? source[key] : [];
+      rows.forEach((row) => {
+        const item = typeof row === "string" ? { nome: row } : (row || {});
+        const name = String(item.nome || "").replace(/\s+/g, " ").trim();
+        if (!name) return;
+        const dedupe = name.toUpperCase();
+        if (seen.has(dedupe)) return;
+        seen.add(dedupe);
+        result[key].push(item);
+      });
+    });
+  });
+
+  return result;
+}
+
+
+function basicPartiesFromDjenItems(items) {
+  const result = { ativo: [], passivo: [], outros: [] };
+  const seen = { ativo: new Set(), passivo: new Set() };
+
+  const push = (key, name, extra = {}) => {
+    const clean = String(name || "").replace(/\s+/g, " ").trim();
+    if (!clean) return;
+    const dedupe = clean.toUpperCase();
+    if (seen[key].has(dedupe)) return;
+    seen[key].add(dedupe);
+    result[key].push({ nome: clean, fonte: "DJEN/CNJ", ...extra });
+  };
+
+  const roleGroups = [
+    { key: "ativo", labels: "AUTOR(?:A)?|REQUERENTE|EXEQUENTE|IMPETRANTE|RECLAMANTE|DEMANDANTE" },
+    { key: "passivo", labels: "R[ÉE]U|R[ÉE]|REQUERID[OA]|EXECUTAD[OA]|RECLAMAD[OA]|IMPETRAD[OA]|DEMANDAD[OA]" }
+  ];
+
+  const terminators = [
+    "AUTOR(?:A)?", "REQUERENTE", "EXEQUENTE", "IMPETRANTE", "RECLAMANTE",
+    "R[ÉE]U", "R[ÉE]", "REQUERID[OA]", "EXECUTAD[OA]", "RECLAMAD[OA]", "IMPETRAD[OA]",
+    "VISTOS?", "RELAT[ÓO]RIO", "DECIDO", "SENTEN[ÇC]A", "DECIS[ÃA]O", "DESPACHO",
+    "PROCESSO", "ADVOGAD[OA]", "INTIMA[ÇC][ÃA]O", "CERTID[ÃA]O"
+  ].join("|");
+
+  (Array.isArray(items) ? items : []).forEach((communication) => {
+    if (!communication || typeof communication !== "object") return;
+
+    (Array.isArray(communication.destinatarios) ? communication.destinatarios : [])
+      .forEach((recipient) => {
+        const pole = String(recipient && recipient.polo || "").trim().toUpperCase();
+        const name = recipient && recipient.nome;
+        if (["A", "ATIVO", "POLO ATIVO", "AUTOR", "AUTORA", "REQUERENTE"].includes(pole)) {
+          push("ativo", name, { papel: pole });
+        } else if (["P", "PASSIVO", "POLO PASSIVO", "RÉU", "REU", "REQUERIDO", "RECLAMADO"].includes(pole)) {
+          push("passivo", name, { papel: pole });
+        }
+      });
+
+    const text = String(communication.texto || "").replace(/\s+/g, " ").slice(0, 16000);
+    if (!text) return;
+
+    roleGroups.forEach(({ key, labels }) => {
+      const pattern = new RegExp(
+        `\\b(?:${labels})\\s*:\\s*(.+?)(?=\\s+(?:${terminators})\\b|$)`,
+        "giu"
+      );
+      for (const match of text.matchAll(pattern)) {
+        const name = String(match[1] || "")
+          .replace(/^[\\-–—:;,.\\s]+|[\\-–—:;,\\s]+$/g, "")
+          .replace(/\\s+/g, " ")
+          .trim();
+        if (name.length >= 2 && name.length <= 300) push(key, name, { papel: "rotulo_textual" });
+      }
+    });
+  });
+
+  return result;
+}
+
+
+async function fetchDjenItemsDirectly() {
+  if (!currentProcessRef) return [];
+
+  const numero = normalizeProcessNumber(currentProcessRef.numero);
+  if (numero.length !== 20) return [];
+
+  const allItems = [];
+  let expectedCount = null;
+
+  for (let page = 1; page <= 5; page += 1) {
+    const url = new URL(`${DJEN_PROXY}/comunicacoes`);
+    url.searchParams.set("numeroProcesso", numero);
+    url.searchParams.set("pagina", String(page));
+    url.searchParams.set("itensPorPagina", "50");
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json" }
+    });
+    const payload = await parseJsonResponse(response);
+
+    if (!response.ok) {
+      throw new Error(payload.erro || payload.message || `DJEN HTTP ${response.status}`);
+    }
+
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (expectedCount === null) {
+      const count = Number(payload.count);
+      expectedCount = Number.isFinite(count) ? count : null;
+    }
+
+    allItems.push(...items.filter((item) => item && typeof item === "object"));
+
+    if (!items.length || items.length < 50) break;
+    if (expectedCount !== null && allItems.length >= expectedCount) break;
+  }
+
+  return allItems;
+}
+
+
+async function parseDjenItemsInBackend(items) {
+  const url = `${processBaseUrl()}/djen/parse`;
+  const headers = { ...authHeaders(), "Content-Type": "application/json" };
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ items })
+  });
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(payload.detail || `Erro HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+
+function liveDefendantNames() {
+  const rows = currentProcess && currentProcess.partes && Array.isArray(currentProcess.partes.passivo)
+    ? currentProcess.partes.passivo
+    : [];
+  return rows.map((row) => String(row && row.nome || "").trim()).filter(Boolean);
+}
+
+
+async function applyDirectDjenFallback() {
+  if (!currentProcessRef || !currentProcess) return;
+
+  const existingDjen = currentProcess.djen || {};
+  const existingParties = currentProcess.partes || {};
+  const hasParties =
+    (Array.isArray(existingParties.ativo) && existingParties.ativo.length) ||
+    (Array.isArray(existingParties.passivo) && existingParties.passivo.length);
+  const hasDjenData = Boolean(
+    existingDjen.ok && (
+      existingDjen.comunicacoes ||
+      existingDjen.valor_da_causa_centavos != null ||
+      existingDjen.valor_dano_moral_primeiro_grau_centavos != null ||
+      existingDjen.valor_dano_moral_final_centavos != null
+    )
+  );
+
+  if (hasParties && hasDjenData) return;
+
+  try {
+    const items = await fetchDjenItemsDirectly();
+    if (!items.length) return;
+
+    let parsed = null;
+    try {
+      parsed = await parseDjenItemsInBackend(items);
+    } catch (parseError) {
+      console.warn("Backend não interpretou o DJEN; usando fallback local de partes.", parseError);
+    }
+
+    const browserParties = basicPartiesFromDjenItems(items);
+    const parsedParties = parsed && parsed.partes ? parsed.partes : browserParties;
+
+    currentProcess.partes = mergePartyCollections(
+      currentProcess.partes || {},
+      mergePartyCollections(browserParties, parsedParties)
+    );
+
+    if (parsed) {
+      currentProcess.djen = parsed;
+      currentProcess.djen_consulta = {
+        ok: true,
+        status: parsed.status || "sem_valor_moral"
+      };
+    } else {
+      currentProcess.djen_consulta = {
+        ok: true,
+        status: items.length ? "sem_valor_moral" : "sem_comunicacoes"
+      };
+    }
+
+    renderProcess(currentProcess);
+  } catch (error) {
+    console.error("Fallback direto do DJEN falhou:", error);
+  }
 }
 
 
@@ -1170,9 +1381,13 @@ async function loadProcess() {
       );
     }
 
+    currentProcess = payload;
+
     renderProcess(
-      payload
+      currentProcess
     );
+
+    await applyDirectDjenFallback();
 
     return true;
 
@@ -1523,11 +1738,17 @@ function renderAnalysis(
         .direito_personalidade
     );
 
+  const liveDefendants = liveDefendantNames();
+  const analysisCompanyValue = String(analysis.empresa_re || "").trim();
+  const companyMissing =
+    !analysisCompanyValue ||
+    ["nao_identificado", "não identificado", "nao identificado"].includes(analysisCompanyValue.toLowerCase());
+
   $("analysisCompany")
     .textContent =
-    friendlyValue(
-      analysis.empresa_re
-    );
+    companyMissing && liveDefendants.length
+      ? liveDefendants.join(" · ")
+      : friendlyValue(analysis.empresa_re);
 
   $("analysisResult")
     .textContent =
