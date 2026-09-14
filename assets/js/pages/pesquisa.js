@@ -8,7 +8,7 @@ const DJEN_PROXY =
   "https://veredicta-djen-br.guilherme-moussalem.workers.dev";
 
 const SEARCH_STATE_KEY =
-  "veredicta_search_state_v5_djen_direct";
+  "veredicta_search_state_v6_company_fallback";
 
 const SELECTED_PROCESS_KEY =
   "veredicta_selected_process_v3";
@@ -853,6 +853,8 @@ async function lookupCompaniesDirectly(row) {
 
   const url = new URL(`${DJEN_PROXY}/comunicacoes`);
   url.searchParams.set("numeroProcesso", numero);
+  url.searchParams.set("pagina", "1");
+  url.searchParams.set("itensPorPagina", "50");
 
   const response = await fetch(url.toString(), {
     method: "GET",
@@ -972,13 +974,21 @@ async function enrichPendingCompanies() {
     );
 
     const directItems = [];
-    const failedRows = [];
+    const fallbackRows = [];
 
     settled.forEach((result, index) => {
       if (result.status === "fulfilled") {
         directItems.push(result.value);
+
+        // O DJEN nem sempre preenche `destinatarios`/`polo` de forma
+        // estruturada. Quando a consulta direta não encontra empresa,
+        // ainda precisamos deixar o backend analisar o texto da comunicação
+        // (RÉU / REQUERIDO / RECLAMADO) antes de concluir que está vazio.
+        if (result.value.status !== "found") {
+          fallbackRows.push(batch[index]);
+        }
       } else {
-        failedRows.push(batch[index]);
+        fallbackRows.push(batch[index]);
         console.warn(
           "Falha na consulta direta ao DJEN:",
           result.reason
@@ -988,9 +998,9 @@ async function enrichPendingCompanies() {
 
     updateCompanyRows(directItems);
 
-    // Se o navegador não conseguir falar com o Worker por algum motivo,
-    // mantém o endpoint do backend como fallback apenas para essas linhas.
-    if (failedRows.length) {
+    // O backend é fallback tanto para falha de rede quanto para comunicações
+    // que não tragam o polo passivo estruturado no JSON do DJEN.
+    if (fallbackRows.length) {
       try {
         const response = await fetch(
           `${API}/api/v1/searches/companies`,
@@ -1003,7 +1013,7 @@ async function enrichPendingCompanies() {
               authHeaders()
             ),
             body: JSON.stringify({
-              items: failedRows.map((row) => ({
+              items: fallbackRows.map((row) => ({
                 tribunal: row.tribunal,
                 numero_processo: row.numero_processo
               }))
