@@ -571,7 +571,7 @@ function liveDefendantNames() {
 }
 
 
-async function applyDirectDjenFallback() {
+async function applyDirectDjenFallback(force = false) {
   if (!currentProcessRef || !currentProcess) return;
 
   const existingDjen = currentProcess.djen || {};
@@ -588,7 +588,7 @@ async function applyDirectDjenFallback() {
     )
   );
 
-  if (hasParties && hasDjenData) return;
+  if (!force && hasParties && hasDjenData) return;
 
   try {
     const items = await fetchDjenItemsDirectly();
@@ -2019,6 +2019,11 @@ async function runAnalysis(
     renderAnalysis(
       payload
     );
+
+    // A análise acabou de ser persistida no Neon. Reenvia as comunicações
+    // obtidas diretamente pelo navegador para que a empresa ré também seja
+    // persistida e apareça imediatamente no Histórico e no filtro por empresa.
+    await applyDirectDjenFallback(true);
 
     await loadOfficialProcessLink();
 

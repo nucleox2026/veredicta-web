@@ -4,6 +4,11 @@
       "https://veredicta-api.onrender.com"
   ).replace(/\/$/, "");
 
+  const DJEN_PROXY =
+    "https://veredicta-djen-br.guilherme-moussalem.workers.dev";
+
+  let historyCompanyBackfillDone = false;
+
   const $a = (id) => document.getElementById(id);
 
   function authHeadersAnalytics() {
@@ -448,6 +453,123 @@
     }
   }
 
+  async function fetchDjenItemsForHistory(row) {
+    const numero = String(row?.numero_processo || "").replace(/\D/g, "");
+    if (numero.length !== 20) return [];
+
+    const allItems = [];
+    let expectedCount = null;
+
+    for (let page = 1; page <= 5; page += 1) {
+      const url = new URL(`${DJEN_PROXY}/comunicacoes`);
+      url.searchParams.set("numeroProcesso", numero);
+      url.searchParams.set("pagina", String(page));
+      url.searchParams.set("itensPorPagina", "50");
+
+      const response = await fetch(url.toString(), {
+        headers: { Accept: "application/json" }
+      });
+
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (_) {
+        payload = {};
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          payload.erro || payload.message || `DJEN HTTP ${response.status}`
+        );
+      }
+
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      if (expectedCount === null) {
+        const count = Number(payload.count);
+        expectedCount = Number.isFinite(count) ? count : null;
+      }
+
+      allItems.push(...items.filter((item) => item && typeof item === "object"));
+
+      if (!items.length || items.length < 50) break;
+      if (expectedCount !== null && allItems.length >= expectedCount) break;
+    }
+
+    return allItems;
+  }
+
+  async function persistHistoryCompanyFromDjen(row) {
+    const tribunal = String(row?.tribunal || "").trim().toUpperCase();
+    const numero = String(row?.numero_processo || "").replace(/\D/g, "");
+    if (!tribunal || numero.length !== 20) return false;
+
+    const items = await fetchDjenItemsForHistory(row);
+    if (!items.length) return false;
+
+    const response = await fetch(
+      `${API_BASE}/api/v1/processes/lookup/` +
+        `${encodeURIComponent(tribunal)}/` +
+        `${encodeURIComponent(numero)}/djen/parse`,
+      {
+        method: "POST",
+        headers: {
+          ...authHeadersAnalytics(),
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ items })
+      }
+    );
+
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch (_) {
+      payload = {};
+    }
+
+    if (!response.ok) {
+      throw new Error(payload.detail || `Erro HTTP ${response.status}`);
+    }
+
+    return Array.isArray(payload.empresas_re_identificadas) &&
+      payload.empresas_re_identificadas.length > 0;
+  }
+
+  async function backfillMissingHistoryCompanies(rows) {
+    const missing = (Array.isArray(rows) ? rows : [])
+      .filter((row) => !String(row?.empresa_re || "").trim());
+
+    if (!missing.length) return 0;
+
+    let nextIndex = 0;
+    let updated = 0;
+    const workerCount = Math.min(4, missing.length);
+
+    async function worker() {
+      while (nextIndex < missing.length) {
+        const row = missing[nextIndex];
+        nextIndex += 1;
+
+        try {
+          if (await persistHistoryCompanyFromDjen(row)) {
+            updated += 1;
+          }
+        } catch (error) {
+          console.warn(
+            `Não foi possível completar empresa ré de ${row?.numero_processo || "processo"}:`,
+            error
+          );
+        }
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: workerCount }, () => worker())
+    );
+
+    return updated;
+  }
+
   async function loadAnalytics() {
     const info = $a("analyticsInfo");
     info.textContent = "Carregando análises salvas...";
@@ -471,6 +593,28 @@
       renderRecurrence(payload);
       renderCapacity(payload);
       renderRows(payload);
+
+      if (!historyCompanyBackfillDone) {
+        historyCompanyBackfillDone = true;
+
+        const missingCount = (Array.isArray(payload.items) ? payload.items : [])
+          .filter((row) => !String(row?.empresa_re || "").trim()).length;
+
+        if (missingCount > 0) {
+          info.textContent =
+            `Completando empresa ré em ${missingCount.toLocaleString("pt-BR")} ` +
+            `análise(s) a partir do DJEN/CNJ...`;
+
+          const updated = await backfillMissingHistoryCompanies(payload.items);
+
+          if (updated > 0) {
+            // O backend acabou de persistir as empresas. Recarrega uma única
+            // vez para atualizar lista, faceta e filtro por empresa.
+            await loadAnalytics();
+            return;
+          }
+        }
+      }
 
       const officialValues = Number(payload.metrics?.valores_djen || 0);
       info.textContent =
