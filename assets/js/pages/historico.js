@@ -1,13 +1,17 @@
 (() => {
+  const CONFIG = window.VEREDICTA_CONFIG || {};
   const API_BASE = String(
-    (window.VEREDICTA_CONFIG || {}).API_BASE_URL ||
+    CONFIG.API_BASE_URL ||
       "https://veredicta-api.onrender.com"
   ).replace(/\/$/, "");
+  const DJEN_PROXY = String(
+    CONFIG.DJEN_PROXY_URL ||
+      "https://veredicta-djen-br.guilherme-moussalem.workers.dev"
+  ).replace(/\/$/, "");
 
-  const DJEN_PROXY =
-    "https://veredicta-djen-br.guilherme-moussalem.workers.dev";
-
-  let historyCompanyBackfillDone = false;
+  const COMPANY_BACKFILL_LIMIT = 25;
+  const companyBackfillAttempted = new Set();
+  let companyBackfillRunning = false;
 
   const $a = (id) => document.getElementById(id);
 
@@ -41,6 +45,157 @@
     if (value === true) return "Sim";
     if (value === false) return "Não";
     return "Aguardando atualização";
+  }
+
+
+  function normalizeProcessNumber(value) {
+    return String(value || "").replace(/\D/g, "");
+  }
+
+  async function parseJsonResponse(response) {
+    try {
+      return await response.json();
+    } catch (_) {
+      return {};
+    }
+  }
+
+  async function fetchDjenItems(numeroProcesso) {
+    const numero = normalizeProcessNumber(numeroProcesso);
+    if (numero.length !== 20) return [];
+
+    const allItems = [];
+    let expectedCount = null;
+
+    for (let page = 1; page <= 5; page += 1) {
+      const url = new URL(`${DJEN_PROXY}/comunicacoes`);
+      url.searchParams.set("numeroProcesso", numero);
+      url.searchParams.set("pagina", String(page));
+      url.searchParams.set("itensPorPagina", "50");
+
+      const response = await fetch(url.toString(), {
+        method: "GET",
+        headers: { Accept: "application/json" }
+      });
+      const payload = await parseJsonResponse(response);
+
+      if (!response.ok) {
+        throw new Error(
+          payload.erro || payload.message || `DJEN HTTP ${response.status}`
+        );
+      }
+
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      if (expectedCount === null) {
+        const count = Number(payload.count);
+        expectedCount = Number.isFinite(count) ? count : null;
+      }
+
+      allItems.push(...items.filter((item) => item && typeof item === "object"));
+
+      if (!items.length || items.length < 50) break;
+      if (expectedCount !== null && allItems.length >= expectedCount) break;
+    }
+
+    return allItems;
+  }
+
+  async function persistCompanyFromDjen(row) {
+    const tribunal = String(row.tribunal || "").trim().toUpperCase();
+    const numero = normalizeProcessNumber(row.numero_processo);
+    if (!tribunal || numero.length !== 20) return false;
+
+    const items = await fetchDjenItems(numero);
+    if (!items.length) return false;
+
+    const response = await fetch(
+      `${API_BASE}/api/v1/processes/lookup/` +
+        `${encodeURIComponent(tribunal)}/` +
+        `${encodeURIComponent(numero)}/djen/parse?persist=true`,
+      {
+        method: "POST",
+        headers: {
+          ...authHeadersAnalytics(),
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ items })
+      }
+    );
+    const payload = await parseJsonResponse(response);
+
+    if (!response.ok) {
+      throw new Error(payload.detail || `Erro HTTP ${response.status}`);
+    }
+
+    return Boolean(
+      payload.persisted &&
+      (
+        payload.empresa_re_salva ||
+        (Array.isArray(payload.empresas_re_identificadas) &&
+          payload.empresas_re_identificadas.length)
+      )
+    );
+  }
+
+  async function backfillMissingCompanies(rows) {
+    if (companyBackfillRunning) return;
+
+    const candidates = (Array.isArray(rows) ? rows : [])
+      .filter((row) => {
+        const numero = normalizeProcessNumber(row.numero_processo);
+        return !String(row.empresa_re || "").trim() &&
+          numero.length === 20 &&
+          row.tribunal &&
+          !companyBackfillAttempted.has(`${row.tribunal}:${numero}`);
+      })
+      .slice(0, COMPANY_BACKFILL_LIMIT);
+
+    if (!candidates.length) return;
+
+    companyBackfillRunning = true;
+    const info = $a("analyticsInfo");
+    if (info) {
+      info.textContent +=
+        ` Atualizando empresa ré de ${candidates.length} processo(s) via DJEN...`;
+    }
+
+    let cursor = 0;
+    let updated = 0;
+
+    async function worker() {
+      while (cursor < candidates.length) {
+        const row = candidates[cursor];
+        cursor += 1;
+
+        const numero = normalizeProcessNumber(row.numero_processo);
+        const key = `${row.tribunal}:${numero}`;
+        companyBackfillAttempted.add(key);
+
+        try {
+          if (await persistCompanyFromDjen(row)) {
+            updated += 1;
+          }
+        } catch (error) {
+          console.warn(
+            `Não foi possível atualizar a empresa ré de ${numero}.`,
+            error
+          );
+        }
+      }
+    }
+
+    try {
+      const parallelism = Math.min(3, candidates.length);
+      await Promise.all(
+        Array.from({ length: parallelism }, () => worker())
+      );
+
+      if (updated > 0) {
+        await loadAnalytics({ allowCompanyBackfill: false });
+      }
+    } finally {
+      companyBackfillRunning = false;
+    }
   }
 
   function createSection() {
@@ -174,7 +329,7 @@
 
     main.appendChild(section);
 
-    $a("analyticsRefresh").addEventListener("click", loadAnalytics);
+    $a("analyticsRefresh").addEventListener("click", () => loadAnalytics());
 
     [
       "filterSentence",
@@ -183,7 +338,7 @@
       "filterConduct",
       "filterRepeatCompanies"
     ].forEach((id) => {
-      $a(id).addEventListener("change", loadAnalytics);
+      $a(id).addEventListener("change", () => loadAnalytics());
     });
 
     $a("analyticsBody").addEventListener("click", handleReadToggle);
@@ -453,124 +608,8 @@
     }
   }
 
-  async function fetchDjenItemsForHistory(row) {
-    const numero = String(row?.numero_processo || "").replace(/\D/g, "");
-    if (numero.length !== 20) return [];
-
-    const allItems = [];
-    let expectedCount = null;
-
-    for (let page = 1; page <= 5; page += 1) {
-      const url = new URL(`${DJEN_PROXY}/comunicacoes`);
-      url.searchParams.set("numeroProcesso", numero);
-      url.searchParams.set("pagina", String(page));
-      url.searchParams.set("itensPorPagina", "50");
-
-      const response = await fetch(url.toString(), {
-        headers: { Accept: "application/json" }
-      });
-
-      let payload = {};
-      try {
-        payload = await response.json();
-      } catch (_) {
-        payload = {};
-      }
-
-      if (!response.ok) {
-        throw new Error(
-          payload.erro || payload.message || `DJEN HTTP ${response.status}`
-        );
-      }
-
-      const items = Array.isArray(payload.items) ? payload.items : [];
-      if (expectedCount === null) {
-        const count = Number(payload.count);
-        expectedCount = Number.isFinite(count) ? count : null;
-      }
-
-      allItems.push(...items.filter((item) => item && typeof item === "object"));
-
-      if (!items.length || items.length < 50) break;
-      if (expectedCount !== null && allItems.length >= expectedCount) break;
-    }
-
-    return allItems;
-  }
-
-  async function persistHistoryCompanyFromDjen(row) {
-    const tribunal = String(row?.tribunal || "").trim().toUpperCase();
-    const numero = String(row?.numero_processo || "").replace(/\D/g, "");
-    if (!tribunal || numero.length !== 20) return false;
-
-    const items = await fetchDjenItemsForHistory(row);
-    if (!items.length) return false;
-
-    const response = await fetch(
-      `${API_BASE}/api/v1/processes/lookup/` +
-        `${encodeURIComponent(tribunal)}/` +
-        `${encodeURIComponent(numero)}/djen/parse`,
-      {
-        method: "POST",
-        headers: {
-          ...authHeadersAnalytics(),
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ items })
-      }
-    );
-
-    let payload = {};
-    try {
-      payload = await response.json();
-    } catch (_) {
-      payload = {};
-    }
-
-    if (!response.ok) {
-      throw new Error(payload.detail || `Erro HTTP ${response.status}`);
-    }
-
-    return Array.isArray(payload.empresas_re_identificadas) &&
-      payload.empresas_re_identificadas.length > 0;
-  }
-
-  async function backfillMissingHistoryCompanies(rows) {
-    const missing = (Array.isArray(rows) ? rows : [])
-      .filter((row) => !String(row?.empresa_re || "").trim());
-
-    if (!missing.length) return 0;
-
-    let nextIndex = 0;
-    let updated = 0;
-    const workerCount = Math.min(4, missing.length);
-
-    async function worker() {
-      while (nextIndex < missing.length) {
-        const row = missing[nextIndex];
-        nextIndex += 1;
-
-        try {
-          if (await persistHistoryCompanyFromDjen(row)) {
-            updated += 1;
-          }
-        } catch (error) {
-          console.warn(
-            `Não foi possível completar empresa ré de ${row?.numero_processo || "processo"}:`,
-            error
-          );
-        }
-      }
-    }
-
-    await Promise.all(
-      Array.from({ length: workerCount }, () => worker())
-    );
-
-    return updated;
-  }
-
-  async function loadAnalytics() {
+  async function loadAnalytics(options = {}) {
+    const allowCompanyBackfill = options.allowCompanyBackfill !== false;
     const info = $a("analyticsInfo");
     info.textContent = "Carregando análises salvas...";
 
@@ -594,34 +633,18 @@
       renderCapacity(payload);
       renderRows(payload);
 
-      if (!historyCompanyBackfillDone) {
-        historyCompanyBackfillDone = true;
-
-        const missingCount = (Array.isArray(payload.items) ? payload.items : [])
-          .filter((row) => !String(row?.empresa_re || "").trim()).length;
-
-        if (missingCount > 0) {
-          info.textContent =
-            `Completando empresa ré em ${missingCount.toLocaleString("pt-BR")} ` +
-            `análise(s) a partir do DJEN/CNJ...`;
-
-          const updated = await backfillMissingHistoryCompanies(payload.items);
-
-          if (updated > 0) {
-            // O backend acabou de persistir as empresas. Recarrega uma única
-            // vez para atualizar lista, faceta e filtro por empresa.
-            await loadAnalytics();
-            return;
-          }
-        }
-      }
-
       const officialValues = Number(payload.metrics?.valores_djen || 0);
       info.textContent =
         `${Number(payload.total || 0).toLocaleString("pt-BR")} ` +
         `análises correspondem aos filtros atuais. ` +
         `${officialValues.toLocaleString("pt-BR")} valor(es) de dano moral ` +
         `usam evidência documental DJEN/CNJ.`;
+
+      if (allowCompanyBackfill) {
+        backfillMissingCompanies(payload.items).catch((error) => {
+          console.warn("Falha ao completar empresas rés no histórico.", error);
+        });
+      }
     } catch (error) {
       console.error(error);
       info.textContent =

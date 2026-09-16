@@ -156,11 +156,23 @@
 
         <label>
           Assunto
-          <select id="subjectCode">
-            <option value="0" selected>
-              Danos morais — todos os ramos
-            </option>
-          </select>
+          <input
+            id="subjectQuery"
+            type="search"
+            value="Danos morais"
+            list="subjectSuggestions"
+            placeholder="Ex.: danos morais, reajuste contratual"
+            autocomplete="off"
+            title="Digite um assunto ou código TPU. Deixe em branco para pesquisar todos os assuntos do segmento de saúde suplementar."
+          />
+          <datalist id="subjectSuggestions">
+            <option value="Danos morais"></option>
+            <option value="Tratamento médico-hospitalar"></option>
+            <option value="Fornecimento de medicamentos"></option>
+            <option value="Reajuste contratual"></option>
+            <option value="Planos de Saúde"></option>
+            <option value="Saúde Suplementar"></option>
+          </datalist>
         </label>
 
         <label>

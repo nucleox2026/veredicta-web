@@ -6,8 +6,10 @@ const API = String(
   "https://veredicta-api.onrender.com"
 ).replace(/\/$/, "");
 
-const DJEN_PROXY =
-  "https://veredicta-djen-br.guilherme-moussalem.workers.dev";
+const DJEN_PROXY = String(
+  CONFIG.DJEN_PROXY_URL ||
+  "https://veredicta-djen-br.guilherme-moussalem.workers.dev"
+).replace(/\/$/, "");
 
 const SELECTED_PROCESS_KEY =
   "veredicta_selected_process_v3";
@@ -19,6 +21,7 @@ let authToken =
 
 let currentProcessRef = null;
 let currentProcess = null;
+let lastDirectDjenItems = [];
 
 const $ = (id) =>
   document.getElementById(id);
@@ -548,7 +551,7 @@ async function fetchDjenItemsDirectly() {
 
 
 async function parseDjenItemsInBackend(items) {
-  const url = `${processBaseUrl()}/djen/parse`;
+  const url = `${processBaseUrl()}/djen/parse?persist=true`;
   const headers = { ...authHeaders(), "Content-Type": "application/json" };
   const response = await fetch(url, {
     method: "POST",
@@ -571,7 +574,7 @@ function liveDefendantNames() {
 }
 
 
-async function applyDirectDjenFallback(force = false) {
+async function applyDirectDjenFallback() {
   if (!currentProcessRef || !currentProcess) return;
 
   const existingDjen = currentProcess.djen || {};
@@ -588,11 +591,12 @@ async function applyDirectDjenFallback(force = false) {
     )
   );
 
-  if (!force && hasParties && hasDjenData) return;
+  if (hasParties && hasDjenData) return;
 
   try {
     const items = await fetchDjenItemsDirectly();
     if (!items.length) return;
+    lastDirectDjenItems = items;
 
     let parsed = null;
     try {
@@ -1817,14 +1821,21 @@ function renderAnalysis(
         )
       : "Reanálise necessária";
 
+  const officialDocumentValue =
+    analysis.valor_origem === "djen_documental";
+
   $("analysisValueConfidence")
     .textContent =
-    (
-      analysis.confianca_valor !== null &&
-      analysis.confianca_valor !== undefined
-    )
-      ? `${analysis.confianca_valor}%`
-      : "Não calculada";
+    officialDocumentValue
+      ? `${friendlyValue(
+          analysis.valor_confianca_documental || "alta"
+        )} (documental)`
+      : (
+          analysis.confianca_valor !== null &&
+          analysis.confianca_valor !== undefined
+        )
+          ? `${analysis.confianca_valor}%`
+          : "Não calculada";
 
   $("analysisValueSource")
     .textContent =
@@ -2020,10 +2031,20 @@ async function runAnalysis(
       payload
     );
 
-    // A análise acabou de ser persistida no Neon. Reenvia as comunicações
-    // obtidas diretamente pelo navegador para que a empresa ré também seja
-    // persistida e apareça imediatamente no Histórico e no filtro por empresa.
-    await applyDirectDjenFallback(true);
+    // Se o navegador já conseguiu consultar o Worker DJEN antes da análise,
+    // reenviamos o mesmo lote agora que a análise existe no banco. Isso
+    // persiste a empresa ré mesmo quando o Render não consegue alcançar o
+    // Worker diretamente.
+    if (lastDirectDjenItems.length) {
+      try {
+        await parseDjenItemsInBackend(lastDirectDjenItems);
+      } catch (syncError) {
+        console.warn(
+          "Não foi possível persistir o fallback DJEN após a análise.",
+          syncError
+        );
+      }
+    }
 
     await loadOfficialProcessLink();
 

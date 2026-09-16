@@ -4,10 +4,15 @@ const API = String(
   CONFIG.API_BASE_URL || "https://veredicta-api.onrender.com"
 ).replace(/\/$/, "");
 
-const DJEN_PROXY =
-  "https://veredicta-djen-br.guilherme-moussalem.workers.dev";
+const DJEN_PROXY = String(
+  CONFIG.DJEN_PROXY_URL ||
+  "https://veredicta-djen-br.guilherme-moussalem.workers.dev"
+).replace(/\/$/, "");
 
 const SEARCH_STATE_KEY =
+  "veredicta_search_state_v8_subject_text";
+
+const LEGACY_SEARCH_STATE_KEY =
   "veredicta_search_state_v7_company_text_fallback";
 
 const SELECTED_PROCESS_KEY =
@@ -241,7 +246,7 @@ function saveSearchState() {
     selectedTribunals: Array.from(selectedTribunals),
     dateFrom: $("dateFrom").value,
     dateTo: $("dateTo").value,
-    subjectCode: $("subjectCode").value,
+    subjectQuery: $("subjectQuery").value,
     pageSizePerTribunal: $("pageSizePerTribunal").value,
     loadedRows: loadedRows,
     nextSearchAfterByTribunal: nextSearchAfterByTribunal,
@@ -268,7 +273,8 @@ function saveSearchState() {
 function readSearchState() {
   try {
     const raw =
-      sessionStorage.getItem(SEARCH_STATE_KEY);
+      sessionStorage.getItem(SEARCH_STATE_KEY) ||
+      sessionStorage.getItem(LEGACY_SEARCH_STATE_KEY);
 
     if (!raw) {
       return null;
@@ -321,8 +327,14 @@ function restoreSearchState() {
     $("dateTo").value = state.dateTo;
   }
 
-  if (state.subjectCode) {
-    $("subjectCode").value = String(state.subjectCode);
+  if (typeof state.subjectQuery === "string") {
+    $("subjectQuery").value = state.subjectQuery;
+  } else if (state.subjectCode != null) {
+    // Migração transparente do estado salvo pela versão anterior.
+    $("subjectQuery").value =
+      Number(state.subjectCode) === 0
+        ? "Danos morais"
+        : String(state.subjectCode);
   }
 
   if (state.pageSizePerTribunal) {
@@ -548,11 +560,14 @@ function validateSearch() {
 function buildInitialSearchRequest() {
   validateSearch();
 
+  const subjectQuery = $("subjectQuery").value.trim();
+
   return {
     tribunais: Array.from(selectedTribunals),
     date_from: $("dateFrom").value,
     date_to: $("dateTo").value,
-    subject_code: Number($("subjectCode").value),
+    subject_code: null,
+    subject_query: subjectQuery || null,
     health_plans_only: true,
     page_size_per_tribunal: Number(
       $("pageSizePerTribunal").value
@@ -590,7 +605,12 @@ function buildLoadMoreRequest() {
     tribunais: activeTribunals,
     date_from: lastSearchRequest.date_from,
     date_to: lastSearchRequest.date_to,
-    subject_code: lastSearchRequest.subject_code,
+    subject_code:
+      lastSearchRequest.subject_code == null
+        ? null
+        : lastSearchRequest.subject_code,
+    subject_query:
+      lastSearchRequest.subject_query || null,
     health_plans_only: true,
     page_size_per_tribunal:
       lastSearchRequest.page_size_per_tribunal,
@@ -1298,8 +1318,17 @@ function renderSearchResults() {
   $("resultsTitle").textContent =
     `${formatNumber(totalFound)} processos de saúde suplementar encontrados`;
 
+  const activeSubject = String(
+    (lastSearchRequest && lastSearchRequest.subject_query) || ""
+  ).trim();
+
+  const subjectDescription = activeSubject
+    ? `Assunto: ${activeSubject}. `
+    : "Todos os assuntos do segmento. ";
+
   $("resultsSubtitle").textContent =
     `${formatNumber(loadedRows.length)} registros carregados. ` +
+    subjectDescription +
     "Recorte DataJud: planos de saúde / saúde suplementar; " +
     "a operadora é confirmada pelo DJEN na ficha após a análise.";
 
@@ -1497,11 +1526,12 @@ function clearSearch() {
   renderTribunals();
   setDefaultDates();
 
-  $("subjectCode").value = "0";
+  $("subjectQuery").value = "Danos morais";
   $("pageSizePerTribunal").value = "10";
 
   resetSearchResults();
   sessionStorage.removeItem(SEARCH_STATE_KEY);
+  sessionStorage.removeItem(LEGACY_SEARCH_STATE_KEY);
 }
 
 
@@ -1602,7 +1632,7 @@ function bindEvents() {
   [
     "dateFrom",
     "dateTo",
-    "subjectCode",
+    "subjectQuery",
     "pageSizePerTribunal"
   ].forEach((id) => {
     $(id).addEventListener(
