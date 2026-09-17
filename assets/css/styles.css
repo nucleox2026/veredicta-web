@@ -418,6 +418,131 @@ select:focus {
 
 
 /* =========================================================
+   RANKING DE EMPRESAS RÉS
+   ========================================================= */
+
+.company-ranking {
+  margin-bottom: 18px;
+  padding: 18px;
+  border: 1px solid #dce5dd;
+  border-radius: 14px;
+  background: #f8faf7;
+}
+
+.company-ranking-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.company-ranking-heading h3 {
+  margin: 5px 0 0;
+  color: #183d29;
+  font-size: 1.05rem;
+}
+
+.company-ranking-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.company-ranking-scan-button {
+  padding: 8px 11px;
+  font-size: .73rem;
+}
+
+.company-ranking-progress {
+  margin: -3px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #dce5dd;
+  border-radius: 9px;
+  background: #fff;
+  color: #526056;
+  font-size: .76rem;
+}
+
+.company-ranking-badge {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: #e7efe9;
+  color: #315a3e;
+  font-size: .72rem;
+  font-weight: 750;
+}
+
+.company-ranking-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.company-ranking-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid #e0e5df;
+  border-radius: 11px;
+  background: #fff;
+}
+
+.company-ranking-position {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 31px;
+  width: 31px;
+  height: 31px;
+  border-radius: 999px;
+  background: #245d3b;
+  color: #fff;
+  font-size: .75rem;
+  font-weight: 800;
+}
+
+.company-ranking-item div {
+  min-width: 0;
+}
+
+.company-ranking-item strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #203c2a;
+  font-size: .82rem;
+  line-height: 1.25;
+}
+
+.company-ranking-item small {
+  display: block;
+  margin-top: 5px;
+  color: #777d78;
+}
+
+.company-ranking-note {
+  margin: 12px 0 0;
+  color: #777d78;
+  font-size: .74rem;
+}
+
+.company-ranking-empty {
+  grid-column: 1 / -1;
+  padding: 16px;
+  border: 1px dashed #d7ddd7;
+  border-radius: 10px;
+  color: #737a74;
+  text-align: center;
+  background: #fff;
+}
+
+
+/* =========================================================
    BOTÕES
    ========================================================= */
 
@@ -923,6 +1048,10 @@ tbody tr:hover {
    ========================================================= */
 
 @media (max-width: 1100px) {
+  .company-ranking-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .tribunal-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -965,6 +1094,10 @@ tbody tr:hover {
 }
 
 @media (max-width: 760px) {
+  .company-ranking-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .tribunal-grid,
   .tribunal-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -976,6 +1109,10 @@ tbody tr:hover {
 }
 
 @media (max-width: 650px) {
+  .company-ranking-heading {
+    flex-direction: column;
+  }
+
   .topbar {
     flex-direction: column;
     align-items: flex-start;
@@ -1016,6 +1153,10 @@ tbody tr:hover {
 }
 
 @media (max-width: 520px) {
+  .company-ranking-list {
+    grid-template-columns: 1fr;
+  }
+
   .layout {
     width: min(100% - 20px, 1280px);
     margin-top: 18px;
@@ -1448,5 +1589,138 @@ tbody tr:hover {
 @media (max-width: 640px) {
   .djen-document-heading {
     align-items: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .company-ranking-heading {
+    flex-direction: column;
+  }
+
+  .company-ranking-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+/* =========================================================
+   PROCESSOS DO TOP 5
+   ========================================================= */
+
+.company-ranking-content {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  width: 100%;
+}
+
+.company-ranking-processes-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #cfdad1;
+  border-radius: 8px;
+  background: #f5f8f5;
+  color: #245d3b;
+  font-size: .72rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.company-ranking-processes-button:hover {
+  background: #edf4ef;
+}
+
+body.modal-open {
+  overflow: hidden;
+}
+
+.company-processes-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  background: rgba(15, 30, 20, .52);
+  backdrop-filter: blur(2px);
+}
+
+.company-processes-modal[hidden] {
+  display: none !important;
+}
+
+.company-processes-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(1180px, 96vw);
+  max-height: 88vh;
+  overflow: hidden;
+  border: 1px solid #d9e2da;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(14, 35, 22, .28);
+}
+
+.company-processes-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px 22px 15px;
+  border-bottom: 1px solid #e4e9e4;
+}
+
+.company-processes-header h3 {
+  margin: 5px 0 4px;
+  color: #183d29;
+  font-size: 1.15rem;
+}
+
+.company-processes-header p {
+  margin: 0;
+  color: #6f786f;
+  font-size: .78rem;
+}
+
+.company-processes-close {
+  flex: 0 0 auto;
+}
+
+.company-processes-table-wrap {
+  overflow: auto;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.company-processes-table-wrap table {
+  min-width: 930px;
+}
+
+.company-processes-table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f7f9f7;
+}
+
+@media (max-width: 700px) {
+  .company-processes-modal {
+    padding: 10px;
+  }
+
+  .company-processes-panel {
+    width: 100%;
+    max-height: 94vh;
+  }
+
+  .company-processes-header {
+    padding: 16px;
   }
 }

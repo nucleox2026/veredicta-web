@@ -8,7 +8,7 @@
     content="Veredicta — inteligência jurídica e jurimetria"
   />
   <title>Veredicta — Inteligência Jurídica</title>
-  <link rel="stylesheet" href="./assets/css/styles.css" />
+  <link rel="stylesheet" href="./assets/css/styles.css?v=20260917-top5v3" />
 </head>
 
 <body>
@@ -55,9 +55,9 @@
         <p>
           Pesquise processos de saúde suplementar e planos de saúde
           diretamente no DataJud, em um ou vários Tribunais de Justiça.
-          A pesquisa não grava os resultados. O nome da operadora
-          (como Hapvida, Unimed, Amil e outras) é confirmado pelo
-          DJEN/CNJ somente quando a análise é solicitada na ficha.
+          A pesquisa não grava os resultados. As empresas rés
+          são identificadas pelo DJEN/CNJ nos resultados carregados,
+          permitindo acompanhar as operadoras mais recorrentes.
         </p>
       </div>
     </section>
@@ -261,6 +261,92 @@
         class="tribunal-summary"
       ></div>
 
+      <section
+        class="company-ranking"
+        id="companyRankingSection"
+        hidden
+        aria-live="polite"
+      >
+        <div class="company-ranking-heading">
+          <div>
+            <span class="eyebrow">TOP 5 EMPRESAS RÉS</span>
+            <h3>Empresas mais recorrentes na pesquisa</h3>
+          </div>
+
+          <div class="company-ranking-actions">
+            <span class="company-ranking-badge" id="companyRankingCoverage">—</span>
+            <button
+              id="fullCompanyScanButton"
+              class="secondary company-ranking-scan-button"
+              type="button"
+              hidden
+            >
+              Processar todos os resultados
+            </button>
+          </div>
+        </div>
+
+        <div
+          id="fullCompanyScanProgress"
+          class="company-ranking-progress"
+          hidden
+          aria-live="polite"
+        ></div>
+
+        <div
+          id="companyRankingList"
+          class="company-ranking-list"
+        ></div>
+
+        <p
+          id="companyRankingNote"
+          class="company-ranking-note"
+        ></p>
+      </section>
+
+      <div
+        id="companyProcessesModal"
+        class="company-processes-modal"
+        hidden
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="companyProcessesTitle"
+      >
+        <div class="company-processes-panel">
+          <div class="company-processes-header">
+            <div>
+              <span class="eyebrow">PROCESSOS DA EMPRESA</span>
+              <h3 id="companyProcessesTitle">Empresa</h3>
+              <p id="companyProcessesCount"></p>
+            </div>
+            <button
+              id="companyProcessesClose"
+              type="button"
+              class="secondary company-processes-close"
+              aria-label="Fechar"
+            >
+              Fechar
+            </button>
+          </div>
+
+          <div class="table-wrap company-processes-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Processo</th>
+                  <th>Tribunal</th>
+                  <th>Ajuizamento</th>
+                  <th>Classe</th>
+                  <th>Órgão julgador</th>
+                  <th>Ação</th>
+                </tr>
+              </thead>
+              <tbody id="companyProcessesBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <div class="table-wrap">
         <table>
           <thead>
@@ -300,6 +386,6 @@
   </main>
 
   <script src="./assets/js/config.js"></script>
-  <script src="./assets/js/pages/pesquisa.js"></script>
+  <script src="./assets/js/pages/pesquisa.js?v=20260917-top5v3"></script>
 </body>
 </html>

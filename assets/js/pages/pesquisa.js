@@ -33,6 +33,17 @@ let searchInProgress = false;
 let companyEnrichmentInProgress = false;
 let companyRetryTimer = null;
 
+let fullRankingRows = [];
+let fullRankingInProgress = false;
+let fullRankingDataLoaded = false;
+let fullRankingPaginationComplete = false;
+let fullRankingUniqueTotal = 0;
+let fullRankingRawTotalFound = 0;
+let fullRankingStatusText = "";
+let fullRankingErrorText = "";
+let savedRankingUpdatedAt = "";
+let companyModalRows = [];
+
 const $ = (id) => document.getElementById(id);
 
 
@@ -674,9 +685,1026 @@ function companyStatusIsFinal(row) {
 
   return (
     status === "found" ||
-    status === "not_found" ||
-    status === "error"
+    status === "not_found"
   );
+}
+
+
+function normalizeCompanyRankingKey(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+function buildCompanyRanking(sourceRows = loadedRows) {
+  const companies = new Map();
+  let identifiedProcesses = 0;
+  let pendingProcesses = 0;
+
+  sourceRows.forEach((row) => {
+    const names = Array.isArray(row.empresa_re)
+      ? row.empresa_re.filter(Boolean)
+      : (row.empresa_re ? [row.empresa_re] : []);
+
+    if (!companyStatusIsFinal(row)) {
+      pendingProcesses += 1;
+    }
+
+    if (!names.length) {
+      return;
+    }
+
+    identifiedProcesses += 1;
+    const seenInProcess = new Set();
+
+    names.forEach((rawName) => {
+      const displayName = String(rawName || "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      const key = normalizeCompanyRankingKey(displayName);
+
+      if (!key || seenInProcess.has(key)) {
+        return;
+      }
+
+      seenInProcess.add(key);
+
+      if (!companies.has(key)) {
+        companies.set(key, {
+          key,
+          count: 0,
+          variants: new Map(),
+          processes: []
+        });
+      }
+
+      const entry = companies.get(key);
+      entry.count += 1;
+      entry.processes.push(row);
+      entry.variants.set(
+        displayName,
+        (entry.variants.get(displayName) || 0) + 1
+      );
+    });
+  });
+
+  const ranking = Array.from(companies.values())
+    .map((entry) => {
+      const displayName = Array.from(entry.variants.entries())
+        .sort((a, b) => {
+          if (b[1] !== a[1]) {
+            return b[1] - a[1];
+          }
+
+          return a[0].localeCompare(b[0], "pt-BR");
+        })[0][0];
+
+      return {
+        key: entry.key,
+        name: displayName,
+        count: entry.count,
+        processes: entry.processes
+      };
+    })
+    .sort((a, b) => {
+      if (b.count !== a.count) {
+        return b.count - a.count;
+      }
+
+      return a.name.localeCompare(b.name, "pt-BR");
+    })
+    .slice(0, 5);
+
+  return {
+    ranking,
+    identifiedProcesses,
+    pendingProcesses
+  };
+}
+
+
+function rankingExpectedProcessCount(sourceRows = []) {
+  if (fullRankingPaginationComplete) {
+    return Number(fullRankingUniqueTotal || sourceRows.length || 0);
+  }
+
+  return Number(totalFound || sourceRows.length || 0);
+}
+
+
+function rankingRawVsUniqueText(sourceRows = []) {
+  if (!fullRankingPaginationComplete) {
+    return "";
+  }
+
+  const raw = Number(fullRankingRawTotalFound || totalFound || 0);
+  const unique = Number(fullRankingUniqueTotal || sourceRows.length || 0);
+
+  if (!raw || !unique || raw === unique) {
+    return "";
+  }
+
+  return ` O DataJud informou ${formatNumber(raw)} registro(s) bruto(s), ` +
+    `correspondentes a ${formatNumber(unique)} processo(s) CNJ único(s).`;
+}
+
+
+function renderCompanyRanking() {
+  const section = $("companyRankingSection");
+
+  if (!section) {
+    return;
+  }
+
+  const list = $("companyRankingList");
+  const note = $("companyRankingNote");
+  const coverage = $("companyRankingCoverage");
+  const scanButton = $("fullCompanyScanButton");
+  const progress = $("fullCompanyScanProgress");
+
+  if (!loadedRows.length && !fullRankingRows.length) {
+    section.hidden = true;
+    list.innerHTML = "";
+    note.textContent = "";
+    coverage.textContent = "—";
+    scanButton.hidden = true;
+    progress.hidden = true;
+    progress.textContent = "";
+    return;
+  }
+
+  section.hidden = false;
+
+  const sourceRows = fullRankingRows.length
+    ? fullRankingRows
+    : loadedRows;
+
+  const {
+    ranking,
+    identifiedProcesses,
+    pendingProcesses
+  } = buildCompanyRanking(sourceRows);
+
+  const processedProcesses = sourceRows.filter(
+    (row) => companyStatusIsFinal(row)
+  ).length;
+
+  if (fullRankingRows.length) {
+    const expectedProcesses = rankingExpectedProcessCount(sourceRows);
+    coverage.textContent =
+      `${formatNumber(processedProcesses)} de ` +
+      `${formatNumber(expectedProcesses)} consultados`;
+  } else {
+    coverage.textContent =
+      `${formatNumber(identifiedProcesses)} de ` +
+      `${formatNumber(loadedRows.length)} processos identificados`;
+  }
+
+  if (!ranking.length) {
+    list.innerHTML = `
+      <div class="company-ranking-empty">
+        ${pendingProcesses > 0
+          ? "Identificando empresas rés no DJEN..."
+          : "Nenhuma empresa ré foi identificada nos resultados processados."}
+      </div>
+    `;
+  } else {
+    list.innerHTML = ranking
+      .map((item, index) => {
+        const processLabel = item.count === 1
+          ? "processo"
+          : "processos";
+
+        return `
+          <article class="company-ranking-item">
+            <span class="company-ranking-position">${index + 1}º</span>
+            <div class="company-ranking-content">
+              <strong>${escapeHtml(item.name)}</strong>
+              <small>
+                ${formatNumber(item.count)} ${processLabel}
+              </small>
+              <button
+                type="button"
+                class="company-ranking-processes-button"
+                data-company-key="${escapeHtml(item.key)}"
+              >
+                Ver ${formatNumber(item.count)} ${processLabel}
+              </button>
+            </div>
+          </article>
+        `;
+      })
+      .join("");
+  }
+
+  if (fullRankingInProgress) {
+    scanButton.hidden = false;
+    scanButton.disabled = true;
+    scanButton.textContent = "Processando pesquisa completa...";
+    progress.hidden = false;
+    progress.textContent = fullRankingStatusText ||
+      "Preparando a leitura de todos os resultados da pesquisa.";
+  } else if (fullRankingDataLoaded) {
+    scanButton.hidden = false;
+    scanButton.disabled = false;
+    scanButton.textContent = pendingProcesses > 0
+      ? `Continuar identificação (${formatNumber(pendingProcesses)} pendente(s))`
+      : "Atualizar levantamento completo";
+    progress.hidden = false;
+
+    const savedAtText = savedRankingUpdatedAt
+      ? ` Última gravação: ${formatDateTime(savedRankingUpdatedAt)}.`
+      : "";
+
+    progress.textContent = fullRankingErrorText
+      ? fullRankingErrorText
+      : `Levantamento salvo: ${formatNumber(sourceRows.length)} processo(s) único(s), ` +
+        `${formatNumber(processedProcesses)} processado(s) e ` +
+        `${formatNumber(identifiedProcesses)} com empresa ré identificada.` +
+        rankingRawVsUniqueText(sourceRows) +
+        savedAtText;
+  } else {
+    const needsFullScan = totalFound > loadedRows.length;
+    scanButton.hidden = !needsFullScan;
+    scanButton.disabled = false;
+    scanButton.textContent = needsFullScan
+      ? `Processar todos os ${formatNumber(totalFound)} resultados`
+      : "Processar todos os resultados";
+    progress.hidden = !fullRankingErrorText;
+    progress.textContent = fullRankingErrorText || "";
+  }
+
+  const pendingText = pendingProcesses > 0
+    ? ` ${formatNumber(pendingProcesses)} processo(s) ainda aguardam identificação no DJEN.`
+    : "";
+
+  if (fullRankingRows.length) {
+    const expectedProcesses = rankingExpectedProcessCount(sourceRows);
+    note.textContent =
+      `Ranking calculado sobre ${formatNumber(sourceRows.length)} de ` +
+      `${formatNumber(expectedProcesses)} processo(s) CNJ único(s) da pesquisa. ` +
+      `Cada empresa é contada no máximo uma vez por processo. ` +
+      `O levantamento completo fica salvo no banco para reaproveitar as empresas já consultadas.` +
+      rankingRawVsUniqueText(sourceRows) +
+      pendingText;
+  } else {
+    note.textContent =
+      "Prévia calculada somente sobre os resultados atualmente carregados. " +
+      "Use “Processar todos os resultados” para calcular o Top 5 sobre a pesquisa inteira. " +
+      "Cada empresa é contada no máximo uma vez por processo." +
+      pendingText;
+  }
+}
+
+
+function resetFullCompanyRanking() {
+  fullRankingRows = [];
+  fullRankingInProgress = false;
+  fullRankingDataLoaded = false;
+  fullRankingPaginationComplete = false;
+  fullRankingUniqueTotal = 0;
+  fullRankingRawTotalFound = 0;
+  fullRankingStatusText = "";
+  fullRankingErrorText = "";
+  savedRankingUpdatedAt = "";
+  companyModalRows = [];
+}
+
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+
+function formatDateTime(value) {
+  if (!value) {
+    return "—";
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
+  }
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short"
+  }).format(parsed);
+}
+
+
+function rankingRequestPayload() {
+  if (!lastSearchRequest) {
+    return null;
+  }
+
+  return {
+    tribunais: Array.isArray(lastSearchRequest.tribunais)
+      ? lastSearchRequest.tribunais
+      : Array.from(selectedTribunals),
+    date_from: lastSearchRequest.date_from,
+    date_to: lastSearchRequest.date_to,
+    subject_code: lastSearchRequest.subject_code == null
+      ? null
+      : lastSearchRequest.subject_code,
+    subject_query: lastSearchRequest.subject_query || null,
+    health_plans_only: true
+  };
+}
+
+
+async function loadSavedCompanyRanking() {
+  const request = rankingRequestPayload();
+  if (!request) {
+    return false;
+  }
+
+  try {
+    const response = await fetch(
+      `${API}/api/v1/searches/rankings/load`,
+      {
+        method: "POST",
+        headers: Object.assign(
+          { "Content-Type": "application/json" },
+          authHeaders()
+        ),
+        body: JSON.stringify(request)
+      }
+    );
+
+    const payload = await parseJsonResponse(response);
+    if (!response.ok || !payload.found) {
+      return false;
+    }
+
+    const savedRows = Array.isArray(payload.rows)
+      ? payload.rows
+      : [];
+
+    if (!savedRows.length) {
+      return false;
+    }
+
+    fullRankingRows = mergeUniqueRows([], savedRows);
+
+    const savedUniqueTotal = Number(payload.total_found || savedRows.length || 0);
+    const savedRawTotal = Number(
+      payload.raw_total_found || payload.total_found || savedRows.length || 0
+    );
+    const currentRawTotal = Number(totalFound || 0);
+
+    fullRankingRawTotalFound = Math.max(savedRawTotal, currentRawTotal);
+
+    // Um snapshot completo continua completo enquanto a nova consulta não
+    // indicar que o DataJud passou a ter mais registros brutos que na coleta
+    // salva. Se houver novos registros, retomamos a paginação para incorporá-los.
+    fullRankingPaginationComplete = Boolean(payload.pagination_complete) &&
+      currentRawTotal <= savedRawTotal;
+
+    fullRankingUniqueTotal = fullRankingPaginationComplete
+      ? Math.max(savedUniqueTotal, fullRankingRows.length)
+      : 0;
+
+    const expectedTotal = fullRankingPaginationComplete
+      ? fullRankingUniqueTotal
+      : Math.max(currentRawTotal, savedRawTotal, savedUniqueTotal);
+
+    fullRankingDataLoaded = fullRankingPaginationComplete &&
+      (expectedTotal <= 0 || fullRankingRows.length >= expectedTotal);
+
+    savedRankingUpdatedAt = payload.updated_at || "";
+
+    if (fullRankingDataLoaded) {
+      fullRankingStatusText =
+        `Levantamento completo recuperado do banco: ` +
+        `${formatNumber(fullRankingRows.length)} processo(s) CNJ único(s).`;
+      fullRankingErrorText = "";
+    } else {
+      fullRankingStatusText =
+        `Levantamento parcial recuperado: ${formatNumber(fullRankingRows.length)} processo(s) único(s). ` +
+        `Clique para continuar a coleta.`;
+      fullRankingErrorText = fullRankingStatusText;
+    }
+
+    renderCompanyRanking();
+    return true;
+  } catch (error) {
+    console.warn("Não foi possível recuperar o ranking salvo:", error);
+    return false;
+  }
+}
+
+
+async function saveFullCompanyRanking() {
+  const request = rankingRequestPayload();
+  if (!request || !fullRankingRows.length) {
+    return false;
+  }
+
+  const response = await fetch(
+    `${API}/api/v1/searches/rankings/save`,
+    {
+      method: "POST",
+      headers: Object.assign(
+        { "Content-Type": "application/json" },
+        authHeaders()
+      ),
+      body: JSON.stringify(Object.assign({}, request, {
+        total_found: totalFound,
+        rows: fullRankingRows,
+        pagination_complete: fullRankingPaginationComplete
+      }))
+    }
+  );
+
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(
+      payload.detail || `Falha ao salvar levantamento: HTTP ${response.status}`
+    );
+  }
+
+  savedRankingUpdatedAt = payload.updated_at || new Date().toISOString();
+
+  if (payload.pagination_complete) {
+    fullRankingPaginationComplete = true;
+    fullRankingUniqueTotal = Number(payload.total_found || fullRankingRows.length);
+    fullRankingRawTotalFound = Number(
+      payload.raw_total_found || totalFound || fullRankingRawTotalFound || 0
+    );
+  }
+
+  return true;
+}
+
+
+async function hydratePersistentCompanyCache(targetRows) {
+  const rows = Array.isArray(targetRows) ? targetRows : [];
+  const unresolved = rows.filter((row) => !companyStatusIsFinal(row));
+
+  for (let offset = 0; offset < unresolved.length; offset += 500) {
+    const chunk = unresolved.slice(offset, offset + 500);
+
+    fullRankingStatusText =
+      `Reaproveitando empresas já salvas: ${formatNumber(Math.min(offset + chunk.length, unresolved.length))} ` +
+      `de ${formatNumber(unresolved.length)} verificadas no banco...`;
+    renderCompanyRanking();
+
+    const response = await fetch(
+      `${API}/api/v1/searches/companies/cache`,
+      {
+        method: "POST",
+        headers: Object.assign(
+          { "Content-Type": "application/json" },
+          authHeaders()
+        ),
+        body: JSON.stringify({
+          items: chunk.map((row) => ({
+            tribunal: row.tribunal,
+            numero_processo: row.numero_processo
+          }))
+        })
+      }
+    );
+
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(
+        payload.detail || `Falha ao consultar cache: HTTP ${response.status}`
+      );
+    }
+
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    updateCompanyRowsIn(rows, items);
+    updateCompanyRowsIn(loadedRows, items);
+  }
+}
+
+
+function updateCompanyRowsIn(targetRows, items) {
+  const byKey = new Map();
+
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    byKey.set(
+      `${item.tribunal || ""}:${item.numero_processo || ""}`,
+      item
+    );
+  });
+
+  targetRows.forEach((row) => {
+    const item = byKey.get(rowKey(row));
+
+    if (!item) {
+      return;
+    }
+
+    const names = Array.isArray(item.empresas_re)
+      ? item.empresas_re.filter(Boolean)
+      : [];
+
+    row.empresa_re = names;
+    row.empresa_re_status = item.status || "not_found";
+    row.empresa_re_fonte = item.fonte || "";
+    row.empresa_re_link = item.link || "";
+  });
+}
+
+
+async function loadAllRowsForCompanyRanking() {
+  // Nunca descarta um levantamento já salvo. Se a atualização falhar no meio,
+  // os processos previamente conhecidos continuam disponíveis e não são
+  // substituídos por uma amostra menor.
+  fullRankingRows = mergeUniqueRows(fullRankingRows, loadedRows);
+  fullRankingRawTotalFound = Math.max(
+    Number(fullRankingRawTotalFound || 0),
+    Number(totalFound || 0)
+  );
+
+  if (fullRankingPaginationComplete) {
+    fullRankingUniqueTotal = Math.max(
+      Number(fullRankingUniqueTotal || 0),
+      fullRankingRows.length
+    );
+    fullRankingStatusText =
+      `Todos os ${formatNumber(fullRankingUniqueTotal)} processos CNJ únicos já estão salvos. ` +
+      `Não é necessário percorrer novamente as páginas do DataJud.`;
+    renderCompanyRanking();
+    return;
+  }
+
+  let cursorMap = Object.assign({}, nextSearchAfterByTribunal);
+  const retryCounts = {};
+  let pageNumber = 0;
+
+  while (Object.keys(cursorMap).length) {
+    const activeTribunals = Object.keys(cursorMap);
+    const rowsBefore = fullRankingRows.length;
+    pageNumber += 1;
+
+    fullRankingStatusText =
+      `Carregando todos os processos no DataJud: ` +
+      `${formatNumber(fullRankingRows.length)} processo(s) CNJ único(s) já reunido(s) ` +
+      `(${formatNumber(totalFound)} registro(s) bruto(s) informados pelo DataJud)...`;
+    renderCompanyRanking();
+
+    const requestBody = {
+      tribunais: activeTribunals,
+      date_from: lastSearchRequest.date_from,
+      date_to: lastSearchRequest.date_to,
+      subject_code:
+        lastSearchRequest.subject_code == null
+          ? null
+          : lastSearchRequest.subject_code,
+      subject_query: lastSearchRequest.subject_query || null,
+      health_plans_only: true,
+      page_size_per_tribunal: 50,
+      search_after_by_tribunal: cursorMap
+    };
+
+    const response = await fetch(
+      `${API}/api/v1/searches/multi`,
+      {
+        method: "POST",
+        headers: Object.assign(
+          { "Content-Type": "application/json" },
+          authHeaders()
+        ),
+        body: JSON.stringify(requestBody)
+      }
+    );
+
+    const payload = await parseJsonResponse(response);
+
+    if (!response.ok) {
+      throw new Error(
+        payload.detail ||
+        `Falha ao carregar todos os resultados: HTTP ${response.status}`
+      );
+    }
+
+    fullRankingRows = mergeUniqueRows(
+      fullRankingRows,
+      Array.isArray(payload.items) ? payload.items : []
+    );
+
+    const errorItems = Array.isArray(payload.errors)
+      ? payload.errors
+      : [];
+    const errorsByTribunal = new Map(
+      errorItems.map((item) => [item.tribunal, item.error || "Falha temporária"])
+    );
+
+    const returnedCursors =
+      payload.next_search_after_by_tribunal || {};
+
+    const nextCursors = {};
+    let retryDelayMs = 120;
+    let retrying = false;
+
+    activeTribunals.forEach((tribunal) => {
+      if (errorsByTribunal.has(tribunal)) {
+        const attempt = Number(retryCounts[tribunal] || 0) + 1;
+        retryCounts[tribunal] = attempt;
+
+        if (attempt > 6) {
+          throw new Error(
+            `O DataJud continuou falhando para ${tribunal} após 6 tentativas. ` +
+            `O levantamento parcial foi preservado; tente continuar novamente em alguns instantes.`
+          );
+        }
+
+        // Mantém exatamente o mesmo cursor para repetir somente a página que
+        // falhou, em vez de encerrar silenciosamente o tribunal.
+        if (cursorMap[tribunal]) {
+          nextCursors[tribunal] = cursorMap[tribunal];
+        }
+
+        retrying = true;
+        retryDelayMs = Math.max(
+          retryDelayMs,
+          Math.min(15000, 1000 * Math.pow(2, attempt - 1))
+        );
+        return;
+      }
+
+      retryCounts[tribunal] = 0;
+
+      const returnedCursor = returnedCursors[tribunal];
+      if (!returnedCursor) {
+        return;
+      }
+
+      // Proteção contra cursor repetido. Sem isso uma resposta anômala do
+      // DataJud poderia manter a mesma página indefinidamente.
+      const previousCursorText = JSON.stringify(cursorMap[tribunal] || null);
+      const returnedCursorText = JSON.stringify(returnedCursor);
+
+      if (
+        previousCursorText === returnedCursorText &&
+        fullRankingRows.length === rowsBefore
+      ) {
+        throw new Error(
+          `O DataJud repetiu o mesmo cursor para ${tribunal}. ` +
+          `O progresso já obtido foi preservado; tente continuar em alguns instantes.`
+        );
+      }
+
+      nextCursors[tribunal] = returnedCursor;
+    });
+
+    cursorMap = nextCursors;
+    renderCompanyRanking();
+
+    if (retrying) {
+      const retriesText = activeTribunals
+        .filter((tribunal) => errorsByTribunal.has(tribunal))
+        .map((tribunal) => `${tribunal} (${retryCounts[tribunal]}/6)`)
+        .join(", ");
+
+      fullRankingStatusText =
+        `DataJud temporariamente indisponível em ${retriesText}. ` +
+        `Aguardando ${Math.ceil(retryDelayMs / 1000)} segundo(s) e tentando a mesma página novamente...`;
+      renderCompanyRanking();
+    }
+
+    await sleep(retryDelayMs);
+  }
+
+  // Se não há mais cursores e não houve erro, a paginação terminou. O total
+  // do DataJud contabiliza documentos/hits; o ranking trabalha com números CNJ
+  // únicos, portanto é normal o total bruto ser maior que fullRankingRows.length.
+  fullRankingPaginationComplete = true;
+  fullRankingUniqueTotal = fullRankingRows.length;
+  fullRankingRawTotalFound = Math.max(
+    Number(fullRankingRawTotalFound || 0),
+    Number(totalFound || 0)
+  );
+
+  const duplicates = Math.max(
+    0,
+    fullRankingRawTotalFound - fullRankingUniqueTotal
+  );
+
+  fullRankingStatusText = duplicates > 0
+    ? `DataJud concluído: ${formatNumber(fullRankingRawTotalFound)} registro(s) bruto(s) ` +
+      `correspondem a ${formatNumber(fullRankingUniqueTotal)} processo(s) CNJ único(s). ` +
+      `${formatNumber(duplicates)} ocorrência(s) repetem número(s) de processo já carregado(s). ` +
+      `Iniciando DJEN...`
+    : `DataJud concluído: ${formatNumber(fullRankingUniqueTotal)} processo(s) CNJ único(s) carregado(s). ` +
+      `Iniciando DJEN...`;
+  renderCompanyRanking();
+
+  // Persiste imediatamente o universo completo antes de iniciar centenas de
+  // consultas DJEN. Assim fechar o navegador não obriga a paginar o DataJud de novo.
+  await saveFullCompanyRanking();
+}
+
+
+async function enrichAllCompaniesForRanking() {
+  // Impede a fila pequena da tabela de disputar as mesmas consultas.
+  if (companyRetryTimer) {
+    clearTimeout(companyRetryTimer);
+    companyRetryTimer = null;
+  }
+
+  while (companyEnrichmentInProgress) {
+    await sleep(200);
+  }
+
+  // Primeiro consulta o Aiven/SQLite em lote. Somente processos realmente
+  // novos seguem para o DJEN.
+  await hydratePersistentCompanyCache(fullRankingRows);
+  renderRows();
+  saveSearchState();
+
+  let consecutiveErrors = 0;
+  let lastSavedProcessed = fullRankingRows.filter(
+    (row) => companyStatusIsFinal(row)
+  ).length;
+
+  while (true) {
+    const pending = fullRankingRows.filter((row) => {
+      if (companyStatusIsFinal(row)) {
+        return false;
+      }
+
+      const status = String(row.empresa_re_status || "");
+      return !status || status === "pending" || status === "loading" ||
+        status === "rate_limited" || status === "error";
+    });
+
+    const processed = fullRankingRows.length - pending.length;
+
+    fullRankingStatusText =
+      `Consultando empresas rés no DJEN: ${formatNumber(processed)} de ` +
+      `${formatNumber(fullRankingRows.length)} processo(s) processados.`;
+    renderCompanyRanking();
+
+    if (!pending.length) {
+      break;
+    }
+
+    // O endpoint do backend aceita até 8 itens; usamos 4 para manter cada
+    // chamada curta e respeitar melhor o rate limit do DJEN.
+    const batch = pending.slice(0, 4);
+
+    batch.forEach((row) => {
+      row.empresa_re_status = "loading";
+    });
+
+    renderCompanyRanking();
+
+    try {
+      const response = await fetch(
+        `${API}/api/v1/searches/companies`,
+        {
+          method: "POST",
+          headers: Object.assign(
+            { "Content-Type": "application/json" },
+            authHeaders()
+          ),
+          body: JSON.stringify({
+            items: batch.map((row) => ({
+              tribunal: row.tribunal,
+              numero_processo: row.numero_processo
+            }))
+          })
+        }
+      );
+
+      const payload = await parseJsonResponse(response);
+
+      if (!response.ok) {
+        throw new Error(
+          payload.detail || `DJEN HTTP ${response.status}`
+        );
+      }
+
+      const items = Array.isArray(payload.items)
+        ? payload.items
+        : [];
+
+      updateCompanyRowsIn(fullRankingRows, items);
+      updateCompanyRowsIn(loadedRows, items);
+      consecutiveErrors = 0;
+
+      const retryAfterSeconds = Number(
+        payload.retry_after_seconds || 0
+      );
+
+      renderRows();
+      saveSearchState();
+
+      const processedNow = fullRankingRows.filter(
+        (row) => companyStatusIsFinal(row)
+      ).length;
+
+      if (
+        processedNow - lastSavedProcessed >= 25 ||
+        retryAfterSeconds > 0 ||
+        processedNow === fullRankingRows.length
+      ) {
+        try {
+          await saveFullCompanyRanking();
+          lastSavedProcessed = processedNow;
+        } catch (saveError) {
+          console.warn("Não foi possível salvar o progresso do ranking:", saveError);
+        }
+      }
+
+      if (retryAfterSeconds > 0) {
+        fullRankingStatusText =
+          `O DJEN atingiu o limite temporário. Aguardando ` +
+          `${formatNumber(retryAfterSeconds)} segundo(s) para continuar ` +
+          `automaticamente...`;
+        renderCompanyRanking();
+        await sleep(retryAfterSeconds * 1000);
+      } else {
+        await sleep(350);
+      }
+    } catch (error) {
+      consecutiveErrors += 1;
+
+      batch.forEach((row) => {
+        if (row.empresa_re_status === "loading") {
+          row.empresa_re_status = consecutiveErrors >= 3
+            ? "error"
+            : "pending";
+        }
+      });
+
+      fullRankingStatusText =
+        consecutiveErrors >= 3
+          ? "Uma parte das consultas ao DJEN falhou; continuando com os demais processos."
+          : "Falha temporária ao consultar o DJEN. Tentando novamente em alguns segundos...";
+      renderCompanyRanking();
+
+      if (consecutiveErrors < 3) {
+        await sleep(3000);
+      } else {
+        consecutiveErrors = 0;
+        await sleep(500);
+      }
+    }
+  }
+}
+
+
+async function processFullCompanyRanking() {
+  if (fullRankingInProgress || !lastSearchRequest || !loadedRows.length) {
+    return;
+  }
+
+  fullRankingInProgress = true;
+  fullRankingDataLoaded = false;
+  fullRankingErrorText = "";
+  fullRankingStatusText = "Preparando a pesquisa completa...";
+
+  // Mantém o snapshot recuperado do Aiven e acrescenta os resultados recém
+  // carregados na tela. Nunca recomeça do zero ao atualizar.
+  fullRankingRows = mergeUniqueRows(fullRankingRows, loadedRows);
+  const rowsBeforeUpdate = fullRankingRows.length;
+  renderCompanyRanking();
+
+  try {
+    await loadAllRowsForCompanyRanking();
+    await enrichAllCompaniesForRanking();
+    fullRankingStatusText = "Salvando levantamento no banco...";
+    renderCompanyRanking();
+    await saveFullCompanyRanking();
+    fullRankingDataLoaded = fullRankingPaginationComplete;
+
+    if (!fullRankingDataLoaded) {
+      fullRankingErrorText =
+        `Levantamento parcial: ${formatNumber(fullRankingRows.length)} processo(s) único(s) carregado(s). ` +
+        `Clique novamente para continuar.`;
+    } else {
+      fullRankingErrorText = "";
+    }
+  } catch (error) {
+    // Se avançamos antes de uma falha temporária, salva esse progresso. O
+    // backend faz merge com o snapshot anterior, portanto nunca reduz a base.
+    if (fullRankingRows.length > rowsBeforeUpdate) {
+      try {
+        await saveFullCompanyRanking();
+      } catch (saveError) {
+        console.warn("Não foi possível salvar o progresso parcial:", saveError);
+      }
+    }
+
+    fullRankingDataLoaded = fullRankingPaginationComplete;
+
+    fullRankingErrorText =
+      error && error.message
+        ? error.message
+        : "Não foi possível processar a pesquisa completa.";
+  } finally {
+    fullRankingInProgress = false;
+    renderCompanyRanking();
+  }
+}
+
+function currentRankingRows() {
+  return fullRankingRows.length ? fullRankingRows : loadedRows;
+}
+
+
+function processHasCompany(row, companyKey) {
+  const names = Array.isArray(row.empresa_re)
+    ? row.empresa_re
+    : (row.empresa_re ? [row.empresa_re] : []);
+
+  return names.some(
+    (name) => normalizeCompanyRankingKey(name) === companyKey
+  );
+}
+
+
+function openCompanyProcesses(companyKey) {
+  const key = String(companyKey || "").trim();
+  if (!key) {
+    return;
+  }
+
+  companyModalRows = currentRankingRows()
+    .filter((row) => processHasCompany(row, key))
+    .sort((a, b) => String(b.data_ajuizamento || "").localeCompare(
+      String(a.data_ajuizamento || "")
+    ));
+
+  const ranking = buildCompanyRanking(currentRankingRows()).ranking;
+  const company = ranking.find((item) => item.key === key);
+  const name = company ? company.name : key;
+
+  $("companyProcessesTitle").textContent = name;
+  $("companyProcessesCount").textContent =
+    `${formatNumber(companyModalRows.length)} processo(s) neste levantamento`;
+
+  $("companyProcessesBody").innerHTML = companyModalRows.length
+    ? companyModalRows.map((row, index) => {
+        const params = new URLSearchParams();
+        params.set("tribunal", row.tribunal || "");
+        params.set("numero", row.numero_processo || "");
+        params.set("origem", "pesquisa");
+        const url = `./processo.html?${params.toString()}`;
+
+        return `
+          <tr>
+            <td class="process-number">${escapeHtml(row.numero_processo || "—")}</td>
+            <td>${escapeHtml(row.tribunal || "—")}</td>
+            <td>${escapeHtml(formatDate(row.data_ajuizamento))}</td>
+            <td>${escapeHtml(row.classe_nome || "—")}</td>
+            <td>${escapeHtml(row.orgao_julgador_nome || "—")}</td>
+            <td class="process-actions">
+              <a
+                class="process-view-button company-modal-process-link"
+                href="${escapeHtml(url)}"
+                data-company-process-index="${index}"
+              >Abrir ficha</a>
+            </td>
+          </tr>
+        `;
+      }).join("")
+    : `<tr><td colspan="6" class="empty-row">Nenhum processo encontrado.</td></tr>`;
+
+  $("companyProcessesModal").hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+
+function closeCompanyProcesses() {
+  $("companyProcessesModal").hidden = true;
+  document.body.classList.remove("modal-open");
+  companyModalRows = [];
+}
+
+
+function handleCompanyRankingClick(event) {
+  const button = event.target.closest(".company-ranking-processes-button");
+  if (!button) {
+    return;
+  }
+  openCompanyProcesses(button.dataset.companyKey);
+}
+
+
+function handleCompanyModalClick(event) {
+  const link = event.target.closest(".company-modal-process-link");
+  if (!link) {
+    return;
+  }
+
+  const index = Number(link.dataset.companyProcessIndex);
+  if (Number.isInteger(index) && companyModalRows[index]) {
+    saveSelectedProcess(companyModalRows[index]);
+  }
+  saveSearchState();
 }
 
 
@@ -991,34 +2019,7 @@ async function lookupCompaniesDirectly(row) {
 
 
 function updateCompanyRows(items) {
-  const byKey = new Map();
-
-  (Array.isArray(items) ? items : []).forEach((item) => {
-    byKey.set(
-      `${item.tribunal || ""}:${item.numero_processo || ""}`,
-      item
-    );
-  });
-
-  loadedRows.forEach((row) => {
-    const item = byKey.get(rowKey(row));
-
-    if (!item) {
-      return;
-    }
-
-    const names = Array.isArray(item.empresas_re)
-      ? item.empresas_re.filter(Boolean)
-      : [];
-
-    row.empresa_re = names;
-    row.empresa_re_status =
-      item.status || "not_found";
-    row.empresa_re_fonte =
-      item.fonte || "";
-    row.empresa_re_link =
-      item.link || "";
-  });
+  updateCompanyRowsIn(loadedRows, items);
 }
 
 
@@ -1036,7 +2037,7 @@ function scheduleCompanyEnrichment(delayMs = 0) {
 
 
 async function enrichPendingCompanies() {
-  if (companyEnrichmentInProgress) {
+  if (companyEnrichmentInProgress || fullRankingInProgress) {
     return;
   }
 
@@ -1045,16 +2046,9 @@ async function enrichPendingCompanies() {
       return false;
     }
 
-    const status = String(
-      row.empresa_re_status || ""
-    );
-
-    return (
-      !status ||
-      status === "pending" ||
-      status === "loading" ||
-      status === "rate_limited"
-    );
+    const status = String(row.empresa_re_status || "");
+    return !status || status === "pending" || status === "loading" ||
+      status === "rate_limited";
   });
 
   if (!pending.length) {
@@ -1062,7 +2056,6 @@ async function enrichPendingCompanies() {
   }
 
   const batch = pending.slice(0, 8);
-
   batch.forEach((row) => {
     row.empresa_re_status = "loading";
   });
@@ -1071,96 +2064,68 @@ async function enrichPendingCompanies() {
   renderRows();
 
   try {
-    // Consulta diretamente o Worker no navegador. Isso elimina o ponto de
-    // falha Render -> DJEN e usa exatamente a rota que já foi validada.
+    // Backend primeiro: ele consulta ProcessAnalysis/cache persistente e só
+    // chama o DJEN quando o processo ainda não foi armazenado.
+    const response = await fetch(
+      `${API}/api/v1/searches/companies`,
+      {
+        method: "POST",
+        headers: Object.assign(
+          { "Content-Type": "application/json" },
+          authHeaders()
+        ),
+        body: JSON.stringify({
+          items: batch.map((row) => ({
+            tribunal: row.tribunal,
+            numero_processo: row.numero_processo
+          }))
+        })
+      }
+    );
+
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(payload.detail || `HTTP ${response.status}`);
+    }
+
+    updateCompanyRows(Array.isArray(payload.items) ? payload.items : []);
+
+    batch.forEach((row) => {
+      if (row.empresa_re_status === "loading") {
+        row.empresa_re_status = "error";
+      }
+    });
+
+    renderRows();
+    saveSearchState();
+
+    const retryAfterSeconds = Number(payload.retry_after_seconds || 0);
+    scheduleCompanyEnrichment(
+      retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 250
+    );
+  } catch (error) {
+    console.warn(
+      "Backend indisponível para identificar empresas; usando DJEN direto como fallback:",
+      error
+    );
+
     const settled = await Promise.allSettled(
       batch.map((row) => lookupCompaniesDirectly(row))
     );
 
     const directItems = [];
-    const fallbackRows = [];
-
     settled.forEach((result, index) => {
       if (result.status === "fulfilled") {
         directItems.push(result.value);
-
-        // O DJEN nem sempre preenche `destinatarios`/`polo` de forma
-        // estruturada. Quando a consulta direta não encontra empresa,
-        // ainda precisamos deixar o backend analisar o texto da comunicação
-        // (RÉU / REQUERIDO / RECLAMADO) antes de concluir que está vazio.
-        if (result.value.status !== "found") {
-          fallbackRows.push(batch[index]);
-        }
       } else {
-        fallbackRows.push(batch[index]);
-        console.warn(
-          "Falha na consulta direta ao DJEN:",
-          result.reason
-        );
+        batch[index].empresa_re_status = "error";
       }
     });
 
     updateCompanyRows(directItems);
-
-    // O backend é fallback tanto para falha de rede quanto para comunicações
-    // que não tragam o polo passivo estruturado no JSON do DJEN.
-    if (fallbackRows.length) {
-      try {
-        const response = await fetch(
-          `${API}/api/v1/searches/companies`,
-          {
-            method: "POST",
-            headers: Object.assign(
-              {
-                "Content-Type": "application/json"
-              },
-              authHeaders()
-            ),
-            body: JSON.stringify({
-              items: fallbackRows.map((row) => ({
-                tribunal: row.tribunal,
-                numero_processo: row.numero_processo
-              }))
-            })
-          }
-        );
-
-        const payload = await parseJsonResponse(response);
-
-        if (response.ok) {
-          updateCompanyRows(payload.items || []);
-        }
-      } catch (fallbackError) {
-        console.warn(
-          "Fallback do backend para empresas falhou:",
-          fallbackError
-        );
-      }
-    }
-
-    batch.forEach((row) => {
-      if (row.empresa_re_status === "loading") {
-        row.empresa_re_status = "error";
-      }
-    });
-
     renderRows();
     saveSearchState();
-    scheduleCompanyEnrichment(250);
-  } catch (error) {
-    console.warn(
-      "Falha ao identificar empresas na pesquisa:",
-      error
-    );
-
-    batch.forEach((row) => {
-      if (row.empresa_re_status === "loading") {
-        row.empresa_re_status = "error";
-      }
-    });
-
-    renderRows();
-    saveSearchState();
+    scheduleCompanyEnrichment(500);
   } finally {
     companyEnrichmentInProgress = false;
   }
@@ -1237,6 +2202,8 @@ async function executeSearch(options) {
       : [];
 
     if (!append) {
+      resetFullCompanyRanking();
+
       lastSearchRequest = Object.assign({}, requestBody, {
         search_after_by_tribunal: null
       });
@@ -1295,6 +2262,11 @@ async function executeSearch(options) {
     renderSearchResults();
     showPartialErrors(payload.errors || []);
     saveSearchState();
+
+    if (!append) {
+      await loadSavedCompanyRanking();
+    }
+
     scheduleCompanyEnrichment(0);
   } catch (error) {
     showError(
@@ -1330,7 +2302,7 @@ function renderSearchResults() {
     `${formatNumber(loadedRows.length)} registros carregados. ` +
     subjectDescription +
     "Recorte DataJud: planos de saúde / saúde suplementar; " +
-    "a operadora é confirmada pelo DJEN na ficha após a análise.";
+    "as empresas rés são identificadas pelo DJEN nos resultados carregados.";
 
   renderMetrics();
   renderTribunalSummary();
@@ -1382,6 +2354,8 @@ function renderTribunalSummary() {
 
 
 function renderRows() {
+  renderCompanyRanking();
+
   if (!loadedRows.length) {
     $("resultsBody").innerHTML = `
       <tr>
@@ -1492,6 +2466,7 @@ function updateLoadMoreButton() {
 
 
 function resetSearchResults() {
+  resetFullCompanyRanking();
   loadedRows = [];
   nextSearchAfterByTribunal = {};
   lastSearchRequest = null;
@@ -1508,6 +2483,7 @@ function resetSearchResults() {
   $("metricLoaded").textContent = "—";
   $("metricErrors").textContent = "—";
 
+  renderCompanyRanking();
   showPartialErrors([]);
   clearError();
   updateLoadMoreButton();
@@ -1620,6 +2596,41 @@ function bindEvents() {
 
   $("loadMore").addEventListener("click", () => {
     executeSearch({ append: true });
+  });
+
+  $("fullCompanyScanButton").addEventListener(
+    "click",
+    processFullCompanyRanking
+  );
+
+  $("companyRankingList").addEventListener(
+    "click",
+    handleCompanyRankingClick
+  );
+
+  $("companyProcessesClose").addEventListener(
+    "click",
+    closeCompanyProcesses
+  );
+
+  $("companyProcessesModal").addEventListener(
+    "click",
+    (event) => {
+      if (event.target === $("companyProcessesModal")) {
+        closeCompanyProcesses();
+      }
+    }
+  );
+
+  $("companyProcessesBody").addEventListener(
+    "click",
+    handleCompanyModalClick
+  );
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("companyProcessesModal").hidden) {
+      closeCompanyProcesses();
+    }
   });
 
   $("downloadCsv").addEventListener("click", downloadCsv);
